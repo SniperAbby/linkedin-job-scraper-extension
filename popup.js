@@ -20,10 +20,16 @@ function readOptions() {
 }
 
 async function refreshStatus() {
-  const data = await chrome.storage.local.get(["liScraperResults", "liScraperStatus", "liScraperDiagnostics"]);
+  const data = await chrome.storage.local.get([
+    "liScraperResults",
+    "liScraperStatus",
+    "liScraperDiagnostics",
+    "liScraperCardLog",
+  ]);
   const results = data.liScraperResults || [];
   const status = data.liScraperStatus || "stopped";
   const diag = data.liScraperDiagnostics;
+  const cardLog = data.liScraperCardLog || [];
   const easyApply = results.filter((r) => r.applyType === "easy_apply").length;
   const offsite = results.filter((r) => r.applyType === "offsite").length;
   const offsiteWithLink = results.filter((r) => r.applyType === "offsite" && r.applyUrl).length;
@@ -44,6 +50,18 @@ async function refreshStatus() {
     } else if (!diag.nextButtonFound) {
       text += `\n\nNo "next page" button found — it either doesn't exist (last page) or its selector is stale.`;
     }
+    if (diag.idPreview) {
+      const missing = diag.idPreview.filter((id) => !id).length;
+      const dupes = diag.idPreview.length - new Set(diag.idPreview.filter(Boolean)).size - missing;
+      text += `\nCard IDs: ${diag.idPreview.length} total, ${missing} missing, ${dupes} duplicate refs`;
+    }
+  }
+
+  if (cardLog.length) {
+    text += `\n\n--- Last ${cardLog.length} card events ---\n`;
+    text += cardLog
+      .map((e) => `#${e.cardIndex} job=${e.jobId || "?"} -> ${e.action}${e.error ? " (" + e.error + ")" : ""}`)
+      .join("\n");
   }
 
   statusEl.textContent = text;

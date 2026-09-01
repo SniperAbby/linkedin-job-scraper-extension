@@ -401,6 +401,13 @@ log("content script loaded on", location.href);
 let running = false;
 let seenIds = new Set();
 let results = [];
+let cardLog = [];
+
+async function logCardEvent(entry) {
+  cardLog.push({ ...entry, t: Date.now() });
+  if (cardLog.length > 20) cardLog = cardLog.slice(-20);
+  await chrome.storage.local.set({ liScraperCardLog: cardLog });
+}
 
 async function persist() {
   await chrome.storage.local.set({
@@ -428,21 +435,31 @@ async function runScrape(options) {
     log(`page ${pageIndex}: ${cards.length} cards found`);
 
     const nextBtnPreview = getNextPageButton();
+    const idPreview = cards.map((c) => getJobIdFromCard(c));
     await chrome.storage.local.set({
       liScraperDiagnostics: {
         pageIndex,
         url: location.href,
         listContainerFound: !!firstMatch(document, SELECTORS.scrollableList),
         cardsFound: cards.length,
+        idPreview,
         nextButtonFound: !!nextBtnPreview,
         updatedAt: Date.now(),
       },
     });
 
-    for (const card of cards) {
+    for (let cardIndex = 0; cardIndex < cards.length; cardIndex++) {
+      const card = cards[cardIndex];
       if (!running) break;
       const jobId = getJobIdFromCard(card);
-      if (!jobId || seenIds.has(jobId)) continue;
+      if (!jobId) {
+        await logCardEvent({ cardIndex, jobId: null, action: "skip-no-id" });
+        continue;
+      }
+      if (seenIds.has(jobId)) {
+        await logCardEvent({ cardIndex, jobId, action: "skip-duplicate" });
+        continue;
+      }
       seenIds.add(jobId);
 
       try {
@@ -459,7 +476,7 @@ async function runScrape(options) {
         delete info._applyButton;
 
         if (options.skipEasyApply && info.applyType === "easy_apply") {
-          log(`job ${jobId}: Easy Apply, skipping (skipEasyApply enabled)`);
+          await logCardEvent({ cardIndex, jobId, action: "skip-easy-apply" });
           await sleep(options.betweenJobsDelayMs);
           continue;
         }
@@ -472,8 +489,10 @@ async function runScrape(options) {
         results.push(info);
         await chrome.storage.local.set({ liScraperSeenIds: Array.from(seenIds) });
         await persist();
+        await logCardEvent({ cardIndex, jobId, action: "processed", applyType: info.applyType });
       } catch (e) {
         log("error scraping card", jobId, e);
+        await logCardEvent({ cardIndex, jobId, action: "error", error: String(e && e.message ? e.message : e) });
       }
 
       await sleep(options.betweenJobsDelayMs);
@@ -517,7 +536,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === "RESET_RESULTS") {
     results = [];
     seenIds = new Set();
-    chrome.storage.local.set({ liScraperResults: [], liScraperSeenIds: [], liScraperStatus: "stopped" });
+    cardLog = [];
+    chrome.storage.local.set({
+      liScraperResults: [],
+      liScraperSeenIds: [],
+      liScraperStatus: "stopped",
+      liScraperCardLog: [],
+      liScraperDiagnostics: null,
+    });
     sendResponse({ ok: true });
     return false;
   }
