@@ -288,6 +288,33 @@ function armApplyCapture(timeoutMs) {
 // unconditionally after every apply attempt — an unclosed "leaving LinkedIn"
 // modal sits on top of the page and blocks every subsequent job card click,
 // which is why only one job per page was getting scraped.
+// LinkedIn routes offsite applies through its own "leaving LinkedIn" warning
+// page (linkedin.com/safety/go/?url=<encoded real destination>) — sometimes
+// that's the URL we end up capturing (as an href, or as the tab's landing
+// page if it doesn't auto-continue). The real employer URL is just the
+// decoded `url` query param, so unwrap it rather than exporting the
+// LinkedIn wrapper link.
+function unwrapLinkedInRedirect(rawUrl) {
+  let url = rawUrl;
+  for (let i = 0; i < 3 && url; i++) {
+    let u;
+    try {
+      u = new URL(url, location.href);
+    } catch (e) {
+      break;
+    }
+    if (!/(^|\.)linkedin\.com$/i.test(u.hostname)) break;
+    const target = u.searchParams.get("url");
+    if (!target) break;
+    try {
+      url = decodeURIComponent(target);
+    } catch (e) {
+      url = target;
+    }
+  }
+  return url;
+}
+
 function closeAnyOpenModal() {
   const modal = document.querySelector('[role="dialog"]') || document.querySelector(".artdeco-modal");
   if (modal) closeModal(modal);
@@ -438,7 +465,8 @@ async function runScrape(options) {
         }
 
         if (options.captureApplyLinks && info.applyType === "offsite" && applyButton) {
-          info.applyUrl = await captureApplyLink(applyButton);
+          const rawApplyUrl = await captureApplyLink(applyButton);
+          info.applyUrl = rawApplyUrl ? unwrapLinkedInRedirect(rawApplyUrl) : rawApplyUrl;
         }
 
         results.push(info);
