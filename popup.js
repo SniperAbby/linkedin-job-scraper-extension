@@ -19,17 +19,33 @@ function readOptions() {
 }
 
 async function refreshStatus() {
-  const data = await chrome.storage.local.get(["liScraperResults", "liScraperStatus"]);
+  const data = await chrome.storage.local.get(["liScraperResults", "liScraperStatus", "liScraperDiagnostics"]);
   const results = data.liScraperResults || [];
   const status = data.liScraperStatus || "stopped";
+  const diag = data.liScraperDiagnostics;
   const easyApply = results.filter((r) => r.applyType === "easy_apply").length;
   const offsite = results.filter((r) => r.applyType === "offsite").length;
   const offsiteWithLink = results.filter((r) => r.applyType === "offsite" && r.applyUrl).length;
-  statusEl.textContent =
+  let text =
     `Status: ${status}\n` +
     `Collected: ${results.length}\n` +
     `Easy Apply: ${easyApply}\n` +
     `Offsite: ${offsite} (${offsiteWithLink} with captured link)`;
+
+  if (diag) {
+    text +=
+      `\n\n--- Diagnostics (page ${diag.pageIndex}) ---\n` +
+      `List container found: ${diag.listContainerFound ? "yes" : "NO"}\n` +
+      `Job cards found: ${diag.cardsFound}\n` +
+      `Next-page button found: ${diag.nextButtonFound ? "yes" : "NO"}`;
+    if (diag.cardsFound === 0) {
+      text += `\n\nNo job cards found on this page — LinkedIn's markup likely changed. Send this diagnostics block back for a fix.`;
+    } else if (!diag.nextButtonFound) {
+      text += `\n\nNo "next page" button found — it either doesn't exist (last page) or its selector is stale.`;
+    }
+  }
+
+  statusEl.textContent = text;
 }
 
 document.getElementById("startBtn").addEventListener("click", async () => {

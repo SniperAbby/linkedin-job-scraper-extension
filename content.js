@@ -86,7 +86,26 @@ function allMatches(root, selectors) {
 }
 
 function getJobCards() {
-  return allMatches(document, SELECTORS.jobCard);
+  const known = allMatches(document, SELECTORS.jobCard);
+  if (known.length) return known;
+
+  // Fallback: LinkedIn's CSS classes get reshuffled but the URL pattern for
+  // a job link (/jobs/view/<id>) is stable, so derive cards from those links
+  // instead of relying on exact class names. Scope to the list container
+  // when we can find it, so we don't also pick up "similar jobs" links that
+  // live inside the detail pane on the right.
+  const container = firstMatch(document, SELECTORS.scrollableList) || document;
+  const links = Array.from(container.querySelectorAll('a[href*="/jobs/view/"]'));
+  const seen = new Set();
+  const derived = [];
+  for (const link of links) {
+    const li = link.closest("li") || link.parentElement;
+    if (li && !seen.has(li)) {
+      seen.add(li);
+      derived.push(li);
+    }
+  }
+  return derived;
 }
 
 function getJobIdFromCard(card) {
@@ -193,7 +212,15 @@ function extractJobInfo(jobId) {
 }
 
 function getNextPageButton() {
-  const btn = firstMatch(document, SELECTORS.nextPageButton);
+  let btn = firstMatch(document, SELECTORS.nextPageButton);
+  if (!btn) {
+    // Fallback: any clickable element whose accessible label mentions "next".
+    btn =
+      Array.from(document.querySelectorAll("button, a")).find((el) => {
+        const label = (el.getAttribute("aria-label") || el.textContent || "").toLowerCase();
+        return label.includes("next") && !label.includes("nextgen");
+      }) || null;
+  }
   if (!btn || btn.disabled || btn.getAttribute("aria-disabled") === "true") return null;
   return btn;
 }
@@ -228,6 +255,18 @@ async function runScrape(options) {
     await autoScrollList();
     const cards = getJobCards();
     log(`page ${pageIndex}: ${cards.length} cards found`);
+
+    const nextBtnPreview = getNextPageButton();
+    await chrome.storage.local.set({
+      liScraperDiagnostics: {
+        pageIndex,
+        url: location.href,
+        listContainerFound: !!firstMatch(document, SELECTORS.scrollableList),
+        cardsFound: cards.length,
+        nextButtonFound: !!nextBtnPreview,
+        updatedAt: Date.now(),
+      },
+    });
 
     for (const card of cards) {
       if (!running) break;
