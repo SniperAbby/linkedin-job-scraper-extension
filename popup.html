@@ -1,0 +1,55 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>LinkedIn Job Link Scraper</title>
+<style>
+  body { font-family: -apple-system, Segoe UI, sans-serif; width: 320px; padding: 12px; color: #1a1a1a; }
+  h1 { font-size: 15px; margin: 0 0 8px; }
+  label { display: block; font-size: 12px; margin-top: 8px; color: #444; }
+  input[type=number] { width: 80px; }
+  .row { display: flex; align-items: center; gap: 6px; margin-top: 8px; }
+  .buttons { display: flex; gap: 8px; margin-top: 12px; }
+  button { flex: 1; padding: 6px 8px; font-size: 13px; cursor: pointer; }
+  #status { margin-top: 10px; font-size: 12px; color: #333; white-space: pre-wrap; }
+  #warning { margin-top: 8px; font-size: 11px; color: #a35a00; }
+  .export-row { display: flex; gap: 8px; margin-top: 8px; }
+</style>
+</head>
+<body>
+  <h1>LinkedIn Job Link Scraper</h1>
+
+  <div class="row">
+    <input type="checkbox" id="captureApplyLinks" checked />
+    <label for="captureApplyLinks" style="margin:0;">Capture external apply links (opens/closes a tab per job — slower)</label>
+  </div>
+
+  <label for="maxPages">Max pages (0 = all)</label>
+  <input type="number" id="maxPages" min="0" value="0" />
+
+  <label for="clickDelayMs">Delay after clicking a job (ms)</label>
+  <input type="number" id="clickDelayMs" min="200" step="100" value="800" />
+
+  <label for="betweenJobsDelayMs">Delay between jobs (ms)</label>
+  <input type="number" id="betweenJobsDelayMs" min="200" step="100" value="600" />
+
+  <label for="betweenPagesDelayMs">Delay between pages (ms)</label>
+  <input type="number" id="betweenPagesDelayMs" min="500" step="100" value="1500" />
+
+  <div class="buttons">
+    <button id="startBtn">Start</button>
+    <button id="stopBtn">Stop</button>
+    <button id="resetBtn">Reset</button>
+  </div>
+
+  <div class="export-row">
+    <button id="exportCsvBtn">Export CSV</button>
+    <button id="exportJsonBtn">Export JSON</button>
+  </div>
+
+  <div id="status">Idle</div>
+  <div id="warning">Must be open on a linkedin.com/jobs/search results page. Use slower delays if LinkedIn starts showing warnings/captchas.</div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
