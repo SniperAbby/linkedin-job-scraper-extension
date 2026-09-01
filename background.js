@@ -24,6 +24,7 @@ function arm(linkedinTabId, timeoutMs) {
   const finish = (result) => {
     if (armed !== state) return;
     clearTimeout(state.timer);
+    clearTimeout(state.settleTimer);
     chrome.tabs.onCreated.removeListener(state.onCreated);
     chrome.tabs.onUpdated.removeListener(state.onUpdated);
     if (state.newTabId != null) {
@@ -41,18 +42,23 @@ function arm(linkedinTabId, timeoutMs) {
     }
   };
 
+  // Some apply flows hop through more than one redirect (LinkedIn tracking
+  // link -> ATS login/redirect -> final posting), each firing its own
+  // "complete" status. Debounce: every "complete" event (re)starts a settle
+  // timer, and we only read the URL once nothing has changed for a bit —
+  // finalizing on the first "complete" was grabbing an intermediate hop.
   state.onUpdated = (tabId, changeInfo, tab) => {
     if (armed !== state || tabId !== state.newTabId) return;
     if (changeInfo.status === "complete" && tab.url && tab.url !== "about:blank") {
-      // Give client-side redirects a moment to settle before we read the URL.
-      setTimeout(async () => {
+      clearTimeout(state.settleTimer);
+      state.settleTimer = setTimeout(async () => {
         try {
           const t = await chrome.tabs.get(tabId);
           finish({ ok: true, url: t.url });
         } catch {
           finish({ ok: true, url: tab.url });
         }
-      }, 1200);
+      }, 1800);
     }
   };
 
@@ -68,6 +74,7 @@ function arm(linkedinTabId, timeoutMs) {
 function disarm() {
   if (!armed) return;
   clearTimeout(armed.timer);
+  clearTimeout(armed.settleTimer);
   chrome.tabs.onCreated.removeListener(armed.onCreated);
   chrome.tabs.onUpdated.removeListener(armed.onUpdated);
   armed = null;

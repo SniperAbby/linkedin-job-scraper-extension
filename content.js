@@ -284,6 +284,15 @@ function armApplyCapture(timeoutMs) {
   };
 }
 
+// Belt-and-suspenders: close whatever modal/dialog is currently open. Used
+// unconditionally after every apply attempt — an unclosed "leaving LinkedIn"
+// modal sits on top of the page and blocks every subsequent job card click,
+// which is why only one job per page was getting scraped.
+function closeAnyOpenModal() {
+  const modal = document.querySelector('[role="dialog"]') || document.querySelector(".artdeco-modal");
+  if (modal) closeModal(modal);
+}
+
 async function captureApplyLink(button, timeoutMs = 12000) {
   // Some offsite jobs render Apply itself as a real <a href="..."> straight
   // to the employer's application page — no click or modal needed at all.
@@ -295,30 +304,38 @@ async function captureApplyLink(button, timeoutMs = 12000) {
   }
 
   const capture = armApplyCapture(timeoutMs);
+  let modal = null;
   try {
-    await chrome.runtime.sendMessage({ type: "ARM_APPLY_CAPTURE", timeoutMs });
-  } catch (e) {
-    log("failed to arm apply capture", e);
-  }
-  button.click();
-
-  const modal = await waitForModal(3000);
-  if (modal) {
-    const continueBtn = findContinueButton(modal);
-    if (continueBtn) {
-      const href = continueBtn.tagName === "A" ? continueBtn.getAttribute("href") : null;
-      if (href && /^https?:\/\//.test(href)) {
-        capture.cancel();
-        closeModal(modal);
-        return href;
-      }
-      continueBtn.click();
-    } else {
-      log("apply modal appeared but no Continue control found");
+    try {
+      await chrome.runtime.sendMessage({ type: "ARM_APPLY_CAPTURE", timeoutMs });
+    } catch (e) {
+      log("failed to arm apply capture", e);
     }
-  }
+    button.click();
 
-  return await capture.promise;
+    modal = await waitForModal(3000);
+    if (modal) {
+      const continueBtn = findContinueButton(modal);
+      if (continueBtn) {
+        const href = continueBtn.tagName === "A" ? continueBtn.getAttribute("href") : null;
+        if (href && /^https?:\/\//.test(href)) {
+          capture.cancel();
+          return href;
+        }
+        continueBtn.click();
+      } else {
+        log("apply modal appeared but no Continue control found");
+      }
+    }
+
+    return await capture.promise;
+  } finally {
+    // Always run, whichever branch returned: close the modal that opened
+    // (if any) and sweep for any dialog left open so the next card isn't blocked.
+    if (modal) closeModal(modal);
+    await sleep(200);
+    closeAnyOpenModal();
+  }
 }
 
 function extractJobInfo(jobId, listInfo) {
@@ -413,6 +430,12 @@ async function runScrape(options) {
         const info = extractJobInfo(jobId, listInfo);
         const applyButton = info._applyButton;
         delete info._applyButton;
+
+        if (options.skipEasyApply && info.applyType === "easy_apply") {
+          log(`job ${jobId}: Easy Apply, skipping (skipEasyApply enabled)`);
+          await sleep(options.betweenJobsDelayMs);
+          continue;
+        }
 
         if (options.captureApplyLinks && info.applyType === "offsite" && applyButton) {
           info.applyUrl = await captureApplyLink(applyButton);
