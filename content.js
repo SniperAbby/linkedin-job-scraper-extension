@@ -69,6 +69,25 @@ function debugSelectors() {
   log("--- end diagnostics ---");
 }
 
+// Walks light DOM plus any open shadow roots, so text-based lookups still
+// work if LinkedIn moves a widget (e.g. the apply button) into a web
+// component's shadow DOM, which plain querySelector cannot see into.
+function deepQueryAll(predicate, root = document.documentElement) {
+  const found = [];
+  const walk = (node) => {
+    if (!node) return;
+    if (node.nodeType === 1 && predicate(node)) found.push(node);
+    if (node.shadowRoot) {
+      for (const child of node.shadowRoot.children) walk(child);
+    }
+    if (node.children) {
+      for (const child of node.children) walk(child);
+    }
+  };
+  walk(root);
+  return found;
+}
+
 function firstMatch(root, selectors) {
   for (const sel of selectors) {
     const el = root.querySelector(sel);
@@ -106,6 +125,26 @@ function getJobCards() {
     }
   }
   return derived;
+}
+
+// Title/company/location are read straight off the list card rather than the
+// detail pane — the list is reliably in light DOM (proven by getJobCards'
+// fallback working), whereas the detail pane's markup/structure has been
+// unreliable to target with fixed selectors.
+function extractListInfo(card) {
+  const linkEl = firstMatch(card, SELECTORS.jobCardClickTarget) || card.querySelector('a[href*="/jobs/view/"]');
+  let title = linkEl ? linkEl.textContent.trim().replace(/\s+/g, " ") : "";
+
+  const lines = (card.innerText || "")
+    .split("\n")
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  if (!title && lines.length) title = lines[0];
+  const rest = lines.filter((l) => l && l !== title);
+  const company = rest[0] || "";
+  const location = rest[1] || "";
+  return { title, company, location };
 }
 
 function getJobIdFromCard(card) {
@@ -159,55 +198,134 @@ function textOf(root, selectors) {
   return el ? el.textContent.trim().replace(/\s+/g, " ") : "";
 }
 
-function classifyApplyButton(btn) {
-  if (!btn) return "unknown";
-  const label = (btn.getAttribute("aria-label") || btn.textContent || "").toLowerCase();
-  if (label.includes("easy apply")) return "easy_apply";
-  if (label.includes("apply")) return "offsite";
-  return "unknown";
+function labelOf(el) {
+  return (el.getAttribute("aria-label") || el.textContent || "").trim().toLowerCase();
 }
 
-function captureApplyLink(button, timeoutMs = 12000) {
-  return new Promise(async (resolve) => {
-    let done = false;
-    const listener = (msg) => {
-      if (msg.type === "APPLY_URL_CAPTURED" && !done) {
-        done = true;
-        chrome.runtime.onMessage.removeListener(listener);
-        resolve(msg.ok ? msg.url : null);
-      }
-    };
-    chrome.runtime.onMessage.addListener(listener);
-    try {
-      await chrome.runtime.sendMessage({ type: "ARM_APPLY_CAPTURE", timeoutMs });
-    } catch (e) {
-      log("failed to arm apply capture", e);
+// Finds the Apply control anywhere in the document (including shadow DOM)
+// and classifies it. Easy Apply applies inside LinkedIn itself (no external
+// link); "offsite" opens/redirects to the employer's own application page.
+function findApplyButtonAndType() {
+  const known = firstMatch(document, SELECTORS.applyButton);
+  if (known) {
+    const label = labelOf(known);
+    return { button: known, type: label.includes("easy apply") ? "easy_apply" : "offsite" };
+  }
+  const candidates = deepQueryAll(
+    (el) => (el.tagName === "BUTTON" || el.tagName === "A") && /apply/.test(labelOf(el))
+  );
+  const button = candidates.find((el) => el.offsetParent !== null) || candidates[0] || null;
+  if (!button) return { button: null, type: "unknown" };
+  return { button, type: labelOf(button).includes("easy apply") ? "easy_apply" : "offsite" };
+}
+
+// LinkedIn shows a "you're leaving LinkedIn" confirmation dialog before
+// sending you to an offsite application; the real destination lives on its
+// Continue control.
+async function waitForModal(timeoutMs = 3000) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const modal =
+      document.querySelector('[role="dialog"]') ||
+      document.querySelector(".artdeco-modal") ||
+      deepQueryAll((el) => el.getAttribute && el.getAttribute("role") === "dialog")[0];
+    if (modal) return modal;
+    await sleep(150);
+  }
+  return null;
+}
+
+function findContinueButton(modal) {
+  const candidates = deepQueryAll(
+    (el) => (el.tagName === "BUTTON" || el.tagName === "A") && /continue/.test(labelOf(el)),
+    modal
+  );
+  return candidates[0] || null;
+}
+
+function closeModal(modal) {
+  const closeBtn = deepQueryAll(
+    (el) => el.tagName === "BUTTON" && /dismiss|close/.test(labelOf(el)),
+    modal
+  )[0];
+  if (closeBtn) closeBtn.click();
+}
+
+function armApplyCapture(timeoutMs) {
+  let resolveFn;
+  let done = false;
+  const promise = new Promise((resolve) => {
+    resolveFn = resolve;
+  });
+  const listener = (msg) => {
+    if (msg.type === "APPLY_URL_CAPTURED" && !done) {
+      done = true;
+      chrome.runtime.onMessage.removeListener(listener);
+      resolveFn(msg.ok ? msg.url : null);
     }
-    button.click();
-    setTimeout(() => {
+  };
+  chrome.runtime.onMessage.addListener(listener);
+  const timer = setTimeout(() => {
+    if (!done) {
+      done = true;
+      chrome.runtime.onMessage.removeListener(listener);
+      resolveFn(null);
+    }
+  }, timeoutMs + 1000);
+  return {
+    promise,
+    cancel: () => {
       if (!done) {
         done = true;
+        clearTimeout(timer);
         chrome.runtime.onMessage.removeListener(listener);
-        resolve(null);
       }
-    }, timeoutMs + 1000);
-  });
+    },
+  };
 }
 
-function extractJobInfo(jobId) {
-  const title = textOf(document, SELECTORS.jobTitle);
-  const company = textOf(document, SELECTORS.companyName);
-  const location = textOf(document, SELECTORS.location);
-  const applyButton = firstMatch(document, SELECTORS.applyButton);
+async function captureApplyLink(button, timeoutMs = 12000) {
+  const capture = armApplyCapture(timeoutMs);
+  try {
+    await chrome.runtime.sendMessage({ type: "ARM_APPLY_CAPTURE", timeoutMs });
+  } catch (e) {
+    log("failed to arm apply capture", e);
+  }
+  button.click();
+
+  const modal = await waitForModal(3000);
+  if (modal) {
+    const continueBtn = findContinueButton(modal);
+    if (continueBtn) {
+      const href = continueBtn.tagName === "A" ? continueBtn.getAttribute("href") : null;
+      if (href && /^https?:\/\//.test(href)) {
+        capture.cancel();
+        closeModal(modal);
+        return href;
+      }
+      continueBtn.click();
+    } else {
+      log("apply modal appeared but no Continue control found");
+    }
+  }
+
+  return await capture.promise;
+}
+
+function extractJobInfo(jobId, listInfo) {
+  const detailTitle = textOf(document, SELECTORS.jobTitle);
+  const detailCompany = textOf(document, SELECTORS.companyName);
+  const detailLocation = textOf(document, SELECTORS.location);
+  const { button, type } = findApplyButtonAndType();
   return {
     jobId,
-    title,
-    company,
-    location,
+    title: detailTitle || listInfo.title,
+    company: detailCompany || listInfo.company,
+    location: detailLocation || listInfo.location,
     jobUrl: `https://www.linkedin.com/jobs/view/${jobId}/`,
-    applyType: classifyApplyButton(applyButton),
+    applyType: type,
     applyUrl: null,
-    _applyButton: applyButton,
+    _applyButton: button,
   };
 }
 
@@ -275,6 +393,7 @@ async function runScrape(options) {
       seenIds.add(jobId);
 
       try {
+        const listInfo = extractListInfo(card);
         clickCard(card);
         const ok = await waitForDetailPane(jobId);
         if (!ok) {
@@ -282,7 +401,7 @@ async function runScrape(options) {
         }
         await sleep(options.clickDelayMs);
 
-        const info = extractJobInfo(jobId);
+        const info = extractJobInfo(jobId, listInfo);
         const applyButton = info._applyButton;
         delete info._applyButton;
 
