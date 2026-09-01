@@ -48,8 +48,26 @@ const SELECTORS = {
   ],
 };
 
-const log = (...args) => console.debug("[LI Scraper]", ...args);
+const log = (...args) => console.log("[LI Scraper]", ...args);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// Logs how many elements each candidate selector matches, so a stale
+// selector shows up immediately instead of silently returning nothing.
+function debugSelectors() {
+  log("--- selector diagnostics ---");
+  for (const [name, list] of Object.entries(SELECTORS)) {
+    for (const sel of list) {
+      let count = -1;
+      try {
+        count = document.querySelectorAll(sel).length;
+      } catch (e) {
+        count = `ERROR: ${e.message}`;
+      }
+      log(`  ${name}: "${sel}" -> ${count}`);
+    }
+  }
+  log("--- end diagnostics ---");
+}
 
 function firstMatch(root, selectors) {
   for (const sel of selectors) {
@@ -180,6 +198,8 @@ function getNextPageButton() {
   return btn;
 }
 
+log("content script loaded on", location.href);
+
 let running = false;
 let seenIds = new Set();
 let results = [];
@@ -198,6 +218,8 @@ async function runScrape(options) {
   results = (await chrome.storage.local.get("liScraperResults")).liScraperResults || [];
   for (const r of results) seenIds.add(r.jobId);
   await persist();
+
+  debugSelectors();
 
   let pageIndex = 0;
   while (running) {
