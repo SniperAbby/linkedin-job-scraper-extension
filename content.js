@@ -285,6 +285,15 @@ function armApplyCapture(timeoutMs) {
 }
 
 async function captureApplyLink(button, timeoutMs = 12000) {
+  // Some offsite jobs render Apply itself as a real <a href="..."> straight
+  // to the employer's application page — no click or modal needed at all.
+  if (button.tagName === "A") {
+    const href = button.getAttribute("href");
+    if (href && /^https?:\/\//.test(href)) {
+      return href;
+    }
+  }
+
   const capture = armApplyCapture(timeoutMs);
   try {
     await chrome.runtime.sendMessage({ type: "ARM_APPLY_CAPTURE", timeoutMs });
