@@ -8,7 +8,14 @@
 // array below. All scraper logs are prefixed "[LI Scraper]".
 
 const SELECTORS = {
-  jobCard: ["li[data-occludable-job-id]", "li.jobs-search-results__list-item", "div.job-card-container[data-job-id]"],
+  // Confirmed from a live DOM dump: each card is a role="button" div whose
+  // componentkey embeds the numeric job id directly — no <a href> involved.
+  jobCard: [
+    'div[componentkey^="job-card-component-ref-"]',
+    "li[data-occludable-job-id]",
+    "li.jobs-search-results__list-item",
+    "div.job-card-container[data-job-id]",
+  ],
   jobCardClickTarget: [
     "a.job-card-container__link",
     "a.job-card-list__title",
@@ -36,12 +43,13 @@ const SELECTORS = {
     ".jobs-apply-button--top-card button",
     "div.jobs-apply-button--top-card button",
   ],
-  nextPageButton: [
-    'button[aria-label="View next page"]',
-    "button.jobs-search-pagination__button--next",
-    ".jobs-search-pagination__button--next",
-  ],
+  // data-testid is a stable QA hook LinkedIn uses regardless of CSS build —
+  // far more reliable than the hashed class names on the same buttons.
+  nextPageButton: ['button[data-testid="pagination-controls-next-button-visible"]'],
+  nextPageButtonHidden: ['button[data-testid="pagination-controls-next-button-hidden"]'],
   scrollableList: [
+    'div[data-testid="lazy-column"]',
+    'div[data-component-type="LazyColumn"]',
     "div.scaffold-layout__list > div",
     "div.jobs-search-results-list",
     "div.scaffold-layout__list",
@@ -134,7 +142,18 @@ function getAllJobViewLinks(root = document) {
 // (the sidebar list precedes the detail pane in DOM order).
 function getListContainer() {
   const known = firstMatch(document, SELECTORS.scrollableList);
-  if (known) return known;
+  if (known) {
+    // The known container might itself scroll, or might just wrap the real
+    // scrolling element — walk up from something inside it to find whichever
+    // ancestor actually has the overflow, preferring that for scrollTop
+    // assignment while still using `known` for scoping card lookups.
+    const sample = known.querySelector('div[componentkey^="job-card-component-ref-"]') || known.firstElementChild;
+    if (sample) {
+      const scrollable = findScrollableAncestor(sample);
+      if (scrollable && known.contains(scrollable)) return scrollable;
+    }
+    return known;
+  }
   const links = getAllJobViewLinks();
   if (!links.length) return null;
   return findScrollableAncestor(links[0]);
@@ -163,27 +182,37 @@ function getJobCards() {
   return derived;
 }
 
+// A <p> sometimes carries two child spans for accessibility: one plain
+// (occasionally empty) and one span[aria-hidden="true"] holding the actual
+// visible text plus a decorative icon span. Reading textContent off the
+// whole <p> would double up or catch stray icon text, so prefer the
+// aria-hidden span's own text when present.
+function cleanPText(p) {
+  if (!p) return "";
+  const hidden = p.querySelector('span[aria-hidden="true"]');
+  const text = (hidden || p).textContent || "";
+  return text.trim().replace(/\s+/g, " ");
+}
+
 // Title/company/location are read straight off the list card rather than the
-// detail pane — the list is reliably in light DOM (proven by getJobCards'
-// fallback working), whereas the detail pane's markup/structure has been
-// unreliable to target with fixed selectors.
+// detail pane — confirmed from a live DOM dump: the card's first three <p>
+// elements are always title, then company, then location, appearing before
+// any footer/benefits text.
 function extractListInfo(card) {
-  const linkEl = firstMatch(card, SELECTORS.jobCardClickTarget) || card.querySelector('a[href*="/jobs/view/"]');
-  let title = linkEl ? linkEl.textContent.trim().replace(/\s+/g, " ") : "";
-
-  const lines = (card.innerText || "")
-    .split("\n")
-    .map((s) => s.trim())
-    .filter(Boolean);
-
-  if (!title && lines.length) title = lines[0];
-  const rest = lines.filter((l) => l && l !== title);
-  const company = rest[0] || "";
-  const location = rest[1] || "";
-  return { title, company, location };
+  const ps = Array.from(card.querySelectorAll("p"));
+  const title = cleanPText(ps[0]);
+  const company = cleanPText(ps[1]);
+  const location = cleanPText(ps[2]);
+  // Confirmed in the DOM dump: Easy Apply jobs show a literal "Easy Apply"
+  // <p> in the card's footer — no need to open the detail pane to know this.
+  const isEasyApply = /\bEasy Apply\b/.test(card.innerText || "");
+  return { title, company, location, isEasyApply };
 }
 
 function getJobIdFromCard(card) {
+  const componentKey = card.getAttribute("componentkey") || "";
+  const fromKey = componentKey.match(/job-card-component-ref-(\d+)/);
+  if (fromKey) return fromKey[1];
   const direct = card.getAttribute("data-occludable-job-id") || card.getAttribute("data-job-id");
   if (direct) return direct.trim();
   const nested = card.querySelector("[data-job-id]");
@@ -405,34 +434,45 @@ function extractJobInfo(jobId, listInfo) {
   const detailTitle = textOf(document, SELECTORS.jobTitle);
   const detailCompany = textOf(document, SELECTORS.companyName);
   const detailLocation = textOf(document, SELECTORS.location);
-  const { button, type } = findApplyButtonAndType();
+  // The list card's own "Easy Apply" text is the reliable signal (confirmed
+  // in a live DOM dump); the detail-pane button search is only needed to
+  // locate the actual clickable control for offsite jobs.
+  const applyType = listInfo.isEasyApply ? "easy_apply" : "offsite";
+  const button = applyType === "offsite" ? findApplyButtonAndType().button : null;
   return {
     jobId,
     title: detailTitle || listInfo.title,
     company: detailCompany || listInfo.company,
     location: detailLocation || listInfo.location,
     jobUrl: `https://www.linkedin.com/jobs/view/${jobId}/`,
-    applyType: type,
+    applyType,
     applyUrl: null,
     _applyButton: button,
   };
 }
 
 function getNextPageButton() {
-  let btn = firstMatch(document, SELECTORS.nextPageButton);
-  if (!btn) {
-    // Fallback: a clickable element labeled "next" that's actually inside a
-    // pagination-looking control. Matching "next" anywhere on the page is
-    // dangerous — LinkedIn has other "Next" buttons (carousels, tours,
-    // "similar jobs" widgets) that aren't the job-list pagination at all,
-    // and clicking those instead silently derails the whole scrape.
-    btn =
-      Array.from(document.querySelectorAll("button, a")).find((el) => {
-        const label = labelOf(el);
-        if (!/\bnext\b/.test(label) || label.includes("nextgen")) return false;
-        return !!el.closest('[class*="pagination" i], nav[aria-label*="pagination" i]');
-      }) || null;
+  // Confirmed from a live DOM dump: the visible/hidden next-page button uses
+  // a stable data-testid regardless of CSS build. The "-hidden" variant
+  // means there genuinely is no next page (last page reached).
+  const visible = firstMatch(document, SELECTORS.nextPageButton);
+  if (visible) {
+    if (visible.disabled || visible.getAttribute("aria-disabled") === "true") return null;
+    return visible;
   }
+  if (firstMatch(document, SELECTORS.nextPageButtonHidden)) return null;
+
+  // Fallback: a clickable element labeled "next" that's actually inside a
+  // pagination-looking control. Matching "next" anywhere on the page is
+  // dangerous — LinkedIn has other "Next" buttons (carousels, tours,
+  // "similar jobs" widgets) that aren't the job-list pagination at all,
+  // and clicking those instead silently derails the whole scrape.
+  const btn =
+    Array.from(document.querySelectorAll("button, a")).find((el) => {
+      const label = labelOf(el);
+      if (!/\bnext\b/.test(label) || label.includes("nextgen")) return false;
+      return !!el.closest('[class*="pagination" i], nav[aria-label*="pagination" i]');
+    }) || null;
   if (!btn || btn.disabled || btn.getAttribute("aria-disabled") === "true") return null;
   return btn;
 }
@@ -505,6 +545,15 @@ async function runScrape(options) {
 
       try {
         const listInfo = extractListInfo(card);
+
+        // The list card's own "Easy Apply" text tells us this without ever
+        // opening the detail pane — skip the click entirely for speed.
+        if (options.skipEasyApply && listInfo.isEasyApply) {
+          await logCardEvent({ cardIndex, jobId, action: "skip-easy-apply" });
+          await sleep(options.betweenJobsDelayMs);
+          continue;
+        }
+
         clickCard(card);
         const ok = await waitForDetailPane(jobId);
         if (!ok) {
@@ -515,12 +564,6 @@ async function runScrape(options) {
         const info = extractJobInfo(jobId, listInfo);
         const applyButton = info._applyButton;
         delete info._applyButton;
-
-        if (options.skipEasyApply && info.applyType === "easy_apply") {
-          await logCardEvent({ cardIndex, jobId, action: "skip-easy-apply" });
-          await sleep(options.betweenJobsDelayMs);
-          continue;
-        }
 
         if (options.captureApplyLinks && info.applyType === "offsite" && applyButton) {
           const rawApplyUrl = await captureApplyLink(applyButton);
