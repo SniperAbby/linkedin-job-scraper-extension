@@ -13,9 +13,9 @@ function readOptions() {
     captureApplyLinks: document.getElementById("captureApplyLinks").checked,
     skipEasyApply: document.getElementById("skipEasyApply").checked,
     maxPages: Number(document.getElementById("maxPages").value) || 0,
-    clickDelayMs: Number(document.getElementById("clickDelayMs").value) || 800,
-    betweenJobsDelayMs: Number(document.getElementById("betweenJobsDelayMs").value) || 600,
-    betweenPagesDelayMs: Number(document.getElementById("betweenPagesDelayMs").value) || 1500,
+    clickDelayMs: Number(document.getElementById("clickDelayMs").value) || 1500,
+    betweenJobsDelayMs: Number(document.getElementById("betweenJobsDelayMs").value) || 1500,
+    betweenPagesDelayMs: Number(document.getElementById("betweenPagesDelayMs").value) || 2000,
   };
 }
 
