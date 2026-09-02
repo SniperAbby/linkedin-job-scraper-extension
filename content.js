@@ -194,20 +194,35 @@ function cleanPText(p) {
   return text.trim().replace(/\s+/g, " ");
 }
 
+function parseWorkplaceTypeText(text) {
+  const t = (text || "").trim().toLowerCase();
+  if (!t) return null;
+  if (/\bremote\b/.test(t)) return "remote";
+  if (/\bhybrid\b/.test(t)) return "hybrid";
+  if (/\bon[-\s]?site\b/.test(t)) return "onsite";
+  return null;
+}
+
 // Confirmed from a live DOM dump: the card's workplace-type and
 // employment-type pills are both <a href="/jobs/search-results/?currentJobId=...">
 // links (LinkedIn reuses its search-filter link component for these badges).
 // That href pattern is stable even though the surrounding class names are
-// hashed and reshuffled, so scope the text match to just those links instead
-// of scanning the whole card (which could false-match "remote" appearing in
-// a job title or description).
-function getWorkplaceType(card) {
-  const badges = card.querySelectorAll('a[href*="/jobs/search-results/"]');
-  for (const badge of badges) {
-    const text = (badge.textContent || "").trim().toLowerCase();
-    if (text === "remote") return "remote";
-    if (text === "hybrid") return "hybrid";
-    if (text === "on-site" || text === "onsite" || text === "on site") return "onsite";
+// hashed and reshuffled. The exact DOM depth of the card wrapper LinkedIn
+// resolves to has shifted before (see getJobCards' fallback), so rather than
+// trust `card` to already contain the badge, walk a few ancestors up too —
+// and require the badge's href to carry this exact job's id, so widening the
+// search can't accidentally pick up a neighboring card's badge instead.
+function getWorkplaceType(card, jobId) {
+  let scope = card;
+  for (let i = 0; i < 5 && scope; i++) {
+    const badges = scope.querySelectorAll('a[href*="/jobs/search-results/"]');
+    for (const badge of badges) {
+      const href = badge.getAttribute("href") || "";
+      if (jobId && !href.includes(`currentJobId=${jobId}`)) continue;
+      const type = parseWorkplaceTypeText(badge.textContent);
+      if (type) return type;
+    }
+    scope = scope.parentElement;
   }
   return null;
 }
@@ -216,7 +231,7 @@ function getWorkplaceType(card) {
 // detail pane — confirmed from a live DOM dump: the card's first three <p>
 // elements are always title, then company, then location, appearing before
 // any footer/benefits text.
-function extractListInfo(card) {
+function extractListInfo(card, jobId) {
   const ps = Array.from(card.querySelectorAll("p"));
   const title = cleanPText(ps[0]);
   const company = cleanPText(ps[1]);
@@ -224,8 +239,24 @@ function extractListInfo(card) {
   // Confirmed in the DOM dump: Easy Apply jobs show a literal "Easy Apply"
   // <p> in the card's footer — no need to open the detail pane to know this.
   const isEasyApply = /\bEasy Apply\b/.test(card.innerText || "");
-  const workplaceType = getWorkplaceType(card);
+  const workplaceType = getWorkplaceType(card, jobId);
   return { title, company, location, isEasyApply, workplaceType };
+}
+
+// Safety net for when the list-card badge couldn't be found (e.g. layout
+// drift breaks getWorkplaceType): the detail pane's top-card location line
+// reads like "Austin, TX (Remote)" / "(Hybrid)" / "(On-site)" — parse the
+// parenthetical once the job is actually open.
+function getDetailWorkplaceType() {
+  const el = firstMatch(document, SELECTORS.location);
+  if (!el) return null;
+  const text = el.textContent || "";
+  const groups = text.match(/\(([^)]+)\)/g) || [];
+  for (const group of groups) {
+    const type = parseWorkplaceTypeText(group);
+    if (type) return type;
+  }
+  return null;
 }
 
 function getJobIdFromCard(card) {
@@ -563,7 +594,7 @@ async function runScrape(options) {
       seenIds.add(jobId);
 
       try {
-        const listInfo = extractListInfo(card);
+        const listInfo = extractListInfo(card, jobId);
 
         // Only remote jobs wanted — hybrid/on-site cards are skipped before
         // ever clicking. A card whose workplace type couldn't be determined
@@ -589,6 +620,19 @@ async function runScrape(options) {
           log(`job ${jobId}: detail pane did not update in time, skipping details`);
         }
         await sleep(options.clickDelayMs);
+
+        // Safety net: if the list-card badge didn't resolve a workplace type
+        // (listInfo.workplaceType === null), check again now that the detail
+        // pane is open, and bail before saving/capturing an apply link for a
+        // hybrid/on-site job that slipped past the pre-click filter.
+        if (!listInfo.workplaceType) {
+          const detailWorkplace = getDetailWorkplaceType();
+          if (detailWorkplace && detailWorkplace !== "remote") {
+            await logCardEvent({ cardIndex, jobId, action: `skip-${detailWorkplace}-detail` });
+            await sleep(options.betweenJobsDelayMs);
+            continue;
+          }
+        }
 
         const info = extractJobInfo(jobId, listInfo);
         const applyButton = info._applyButton;
