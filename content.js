@@ -194,6 +194,24 @@ function cleanPText(p) {
   return text.trim().replace(/\s+/g, " ");
 }
 
+// Confirmed from a live DOM dump: the card's workplace-type and
+// employment-type pills are both <a href="/jobs/search-results/?currentJobId=...">
+// links (LinkedIn reuses its search-filter link component for these badges).
+// That href pattern is stable even though the surrounding class names are
+// hashed and reshuffled, so scope the text match to just those links instead
+// of scanning the whole card (which could false-match "remote" appearing in
+// a job title or description).
+function getWorkplaceType(card) {
+  const badges = card.querySelectorAll('a[href*="/jobs/search-results/"]');
+  for (const badge of badges) {
+    const text = (badge.textContent || "").trim().toLowerCase();
+    if (text === "remote") return "remote";
+    if (text === "hybrid") return "hybrid";
+    if (text === "on-site" || text === "onsite" || text === "on site") return "onsite";
+  }
+  return null;
+}
+
 // Title/company/location are read straight off the list card rather than the
 // detail pane — confirmed from a live DOM dump: the card's first three <p>
 // elements are always title, then company, then location, appearing before
@@ -206,7 +224,8 @@ function extractListInfo(card) {
   // Confirmed in the DOM dump: Easy Apply jobs show a literal "Easy Apply"
   // <p> in the card's footer — no need to open the detail pane to know this.
   const isEasyApply = /\bEasy Apply\b/.test(card.innerText || "");
-  return { title, company, location, isEasyApply };
+  const workplaceType = getWorkplaceType(card);
+  return { title, company, location, isEasyApply, workplaceType };
 }
 
 function getJobIdFromCard(card) {
@@ -545,6 +564,16 @@ async function runScrape(options) {
 
       try {
         const listInfo = extractListInfo(card);
+
+        // Only remote jobs wanted — hybrid/on-site cards are skipped before
+        // ever clicking. A card whose workplace type couldn't be determined
+        // (workplaceType === null) is kept rather than skipped, since that
+        // means detection failed, not that the job is confirmed non-remote.
+        if (listInfo.workplaceType && listInfo.workplaceType !== "remote") {
+          await logCardEvent({ cardIndex, jobId, action: `skip-${listInfo.workplaceType}` });
+          await sleep(options.betweenJobsDelayMs);
+          continue;
+        }
 
         // The list card's own "Easy Apply" text tells us this without ever
         // opening the detail pane — skip the click entirely for speed.
