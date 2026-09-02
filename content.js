@@ -104,6 +104,42 @@ function allMatches(root, selectors) {
   return [];
 }
 
+// Finds the actual scrolling element by walking up from a node and checking
+// real computed overflow/scroll-height, instead of guessing LinkedIn's
+// (frequently reshuffled) class names. This is what lets us reliably find
+// the sidebar job list's own scroll container regardless of its classes.
+function findScrollableAncestor(el) {
+  let node = el;
+  let depth = 0;
+  while (node && depth < 15) {
+    const style = window.getComputedStyle(node);
+    if (
+      (style.overflowY === "auto" || style.overflowY === "scroll") &&
+      node.scrollHeight > node.clientHeight + 10
+    ) {
+      return node;
+    }
+    node = node.parentElement;
+    depth++;
+  }
+  return null;
+}
+
+function getAllJobViewLinks(root = document) {
+  return Array.from(root.querySelectorAll('a[href*="/jobs/view/"]'));
+}
+
+// Resolves the sidebar list's scroll container: known selectors first, then
+// the real scrollable ancestor of the first job link found in the page
+// (the sidebar list precedes the detail pane in DOM order).
+function getListContainer() {
+  const known = firstMatch(document, SELECTORS.scrollableList);
+  if (known) return known;
+  const links = getAllJobViewLinks();
+  if (!links.length) return null;
+  return findScrollableAncestor(links[0]);
+}
+
 function getJobCards() {
   const known = allMatches(document, SELECTORS.jobCard);
   if (known.length) return known;
@@ -113,8 +149,8 @@ function getJobCards() {
   // instead of relying on exact class names. Scope to the list container
   // when we can find it, so we don't also pick up "similar jobs" links that
   // live inside the detail pane on the right.
-  const container = firstMatch(document, SELECTORS.scrollableList) || document;
-  const links = Array.from(container.querySelectorAll('a[href*="/jobs/view/"]'));
+  const container = getListContainer() || document;
+  const links = getAllJobViewLinks(container);
   const seen = new Set();
   const derived = [];
   for (const link of links) {
@@ -161,7 +197,7 @@ function getJobIdFromCard(card) {
 }
 
 async function autoScrollList() {
-  const container = firstMatch(document, SELECTORS.scrollableList) || document.scrollingElement;
+  const container = getListContainer() || document.scrollingElement;
   if (!container) return;
   let lastCount = -1;
   let stableRounds = 0;
@@ -385,11 +421,16 @@ function extractJobInfo(jobId, listInfo) {
 function getNextPageButton() {
   let btn = firstMatch(document, SELECTORS.nextPageButton);
   if (!btn) {
-    // Fallback: any clickable element whose accessible label mentions "next".
+    // Fallback: a clickable element labeled "next" that's actually inside a
+    // pagination-looking control. Matching "next" anywhere on the page is
+    // dangerous — LinkedIn has other "Next" buttons (carousels, tours,
+    // "similar jobs" widgets) that aren't the job-list pagination at all,
+    // and clicking those instead silently derails the whole scrape.
     btn =
       Array.from(document.querySelectorAll("button, a")).find((el) => {
-        const label = (el.getAttribute("aria-label") || el.textContent || "").toLowerCase();
-        return label.includes("next") && !label.includes("nextgen");
+        const label = labelOf(el);
+        if (!/\bnext\b/.test(label) || label.includes("nextgen")) return false;
+        return !!el.closest('[class*="pagination" i], nav[aria-label*="pagination" i]');
       }) || null;
   }
   if (!btn || btn.disabled || btn.getAttribute("aria-disabled") === "true") return null;
@@ -440,7 +481,7 @@ async function runScrape(options) {
       liScraperDiagnostics: {
         pageIndex,
         url: location.href,
-        listContainerFound: !!firstMatch(document, SELECTORS.scrollableList),
+        listContainerFound: !!getListContainer(),
         cardsFound: cards.length,
         idPreview,
         nextButtonFound: !!nextBtnPreview,
